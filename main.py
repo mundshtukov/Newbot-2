@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Отключаем лишние логи
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNINGവ
 
 # Глобальные переменные
 cached_coins = []
@@ -247,13 +247,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             KeyboardButton("💰 К списку монет"),
-            KeyboardButton("📋 Инструкция")
-        ]
+            KeyboardButton("🔍 Анализ по тикеру") if is_super_admin(user_id) or is_admin_user(user_id) else None
+        ],
+        [KeyboardButton("📋 Инструкция")]
     ]
-    
-    # Добавляем кнопку "Анализ по тикеру" для админов
-    if is_super_admin(user_id) or is_admin_user(user_id):
-        keyboard[0].append(KeyboardButton("🔍 Анализ по тикеру"))
     
     # Добавляем кнопку статистики прокси для разрешенных пользователей
     if can_view_proxy_stats(user_id):
@@ -263,10 +260,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_super_admin(user_id):
         keyboard.append([KeyboardButton("🔄 Обновить список")])
 
+    # Фильтруем None из списка кнопок
+    keyboard[0] = [btn for btn in keyboard[0] if btn is not None]
+    
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        f"👋 Привет, {update.effective_user.first_name}!\n\n"
-        "Я бот для анализа криптовалют. Выбери опцию ниже 👇",
+        """🤖 Привет! Я твой ИИ-помощник в трейдинге
+
+💡 Уникальная система анализа криптовалют
+
+🎯 Получай готовые торговые сигналы:
+• Точки входа с максимальной вероятностью успеха
+• Четкие уровни стоп-лосс и тейк-профит
+• Обоснование каждого сигнала
+• Анализ на основе современных алгоритмов
+
+⚡ Почему именно мы:
+✅ Технологии машинного обучения
+✅ Анализ множества индикаторов одновременно
+✅ Постоянное обновление данных
+✅ Простота использования для любого уровня
+
+📈 Готов помочь тебе в трейдинге!
+
+🚀 Выбери любую из топ-12 криптовалют для получения торгового сигнала или изучи инструкцию для максимальной эффективности 👇""",
+        parse_mode='Markdown',
         reply_markup=reply_markup
     )
 
@@ -312,7 +330,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown')
             context.user_data['signal_message_id'] = error_msg.message_id
 
-async def delete_signal_message(context: ContextTypes.DEFAULT_TYPE):
+async def delete_signal_message(context:/ContextTypes.DEFAULT_TYPE):
     """Удаляет предыдущее сообщение с сигналом если оно есть"""
     if 'signal_message_id' in context.user_data:
         try:
@@ -343,9 +361,6 @@ async def show_coins_list(update: Update, context: ContextTypes.DEFAULT_TYPE, ed
         for coin in cached_coins[i:i+3]:
             row.append(InlineKeyboardButton(f"{coin}", callback_data=f"analyze_{coin}"))
         keyboard.append(row)
-    
-    # Добавляем кнопку "Назад к меню"
-    keyboard.append([InlineKeyboardButton("💰 Назад к меню", callback_data="show_coins")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
