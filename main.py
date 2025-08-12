@@ -23,6 +23,10 @@ logging.basicConfig(
     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Отключаем лишние логи
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Глобальные переменные
 cached_coins = []
 telegram_app = None
@@ -81,7 +85,7 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    # Создаем Telegram Application (только основной способ, без альтернативного для избежания ошибок с Updater)
+    # Создаем Telegram Application
     try:
         telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         logger.info("✅ Telegram Application создан успешно")
@@ -105,11 +109,32 @@ async def lifespan(app: FastAPI):
     # Настройка webhook или polling
     try:
         if WEBHOOK_URL:
-            await telegram_app.bot.set_webhook(WEBHOOK_URL)
-            logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
+            # Устанавливаем webhook
+            webhook_path = f"{WEBHOOK_URL}/webhook"
+            logger.info(f"🌐 Устанавливаем webhook: {webhook_path}")
+            
+            # Увеличиваем timeout для webhook
+            await asyncio.wait_for(
+                telegram_app.bot.set_webhook(webhook_path), 
+                timeout=30
+            )
+            logger.info(f"✅ Webhook установлен: {webhook_path}")
         else:
-            asyncio.create_task(telegram_app.run_polling())
+            # Запускаем polling в отдельной задаче
+            logger.info("🔄 Запуск polling...")
+            
+            # Инициализируем приложение
+            await telegram_app.initialize()
+            await telegram_app.start()
+            
+            # Запускаем polling в фоновой задаче
+            polling_task = asyncio.create_task(telegram_app.updater.start_polling())
             logger.info("✅ Polling запущен")
+            
+    except asyncio.TimeoutError:
+        logger.error("❌ Timeout при установке webhook")
+        yield
+        return
     except Exception as e:
         logger.error(f"❌ Ошибка настройки webhook/polling: {e}")
         yield
@@ -204,10 +229,26 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown приложения...")
     shutdown_event.set()
     if telegram_app:
-        await telegram_app.stop()
+        try:
+            if telegram_app.updater and telegram_app.updater.running:
+                await telegram_app.updater.stop()
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+        except Exception as e:
+            logger.error(f"Ошибка при shutdown: {e}")
 
 # FastAPI app
 app = FastAPI(lifespan=lifespan)
+
+# Добавляем корневой endpoint
+@app.get("/")
+async def root():
+    """Корневой endpoint для проверки состояния"""
+    return {
+        "status": "running",
+        "service": "telegram-bot",
+        "timestamp": datetime.now().isoformat()
+    }
 
 async def delete_signal_message(context):
     """Удаляет предыдущее сообщение с сигналом если оно существует"""
@@ -225,6 +266,8 @@ async def delete_signal_message(context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user_id = update.effective_user.id
+    logger.info(f"Команда /start от пользователя {user_id}")
+    
     if not await has_basic_access(context.bot, user_id):
         await update.message.reply_text(get_chat_access_denied_message())
         return
@@ -267,6 +310,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ticker = query.data
     user_id = query.from_user.id
+    logger.info(f"Нажата кнопка {ticker} пользователем {user_id}")
 
     if not await has_basic_access(context.bot, query.from_user.id):
         await query.edit_message_text(get_chat_access_denied_message())
@@ -302,6 +346,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
     user_id = update.message.from_user.id
+    logger.info(f"Сообщение '{text}' от пользователя {user_id}")
 
     # Проверяем базовый доступ: либо админ, либо участник чата
     if not is_admin_user(user_id) and not await is_chat_member(context.bot, user_id):
@@ -434,15 +479,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def webhook(request: Request):
     """Обработчик webhook для Telegram"""
     global telegram_app
-    if telegram_app:
-        update = Update.de_json(await request.json(), telegram_app.bot)
-        await telegram_app.process_update(update)
-    return {"status": "ok"}
+    
+    try:
+        if telegram_app and telegram_app.bot:
+            data = await request.json()
+            logger.info(f"Получен webhook: {data}")
+            update = Update.de_json(data, telegram_app.bot)
+            
+            # Создаем новый контекст для каждого обновления
+            await telegram_app.process_update(update)
+            
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Ошибка обработки webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/keepalive")
 async def keepalive():
     """Keep-alive endpoint"""
-    return {"status": "alive"}
+    return {
+        "status": "alive", 
+        "timestamp": datetime.now().isoformat(),
+        "bot_status": "running" if telegram_app and telegram_app.running else "stopped"
+    }
 
 async def main():
     """Основная функция с обработкой перезапуска"""
