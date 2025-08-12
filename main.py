@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Отключаем лишние логи
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNINGവ
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Глобальные переменные
 cached_coins = []
