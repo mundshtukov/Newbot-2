@@ -81,25 +81,14 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    # Создаем Telegram Application
+    # Создаем Telegram Application (только основной способ, без альтернативного для избежания ошибок с Updater)
     try:
-        # Основной способ создания приложения
         telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        logger.info("✅ Telegram Application создан успешно (основным способом)")
+        logger.info("✅ Telegram Application создан успешно")
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка создания Telegram Application основным способом: {e}")
-        try:
-            # Альтернативный способ без конкретных настроек
-            from telegram.ext import Application
-            from telegram import Bot
-            
-            bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            telegram_app = Application.builder().bot(bot).build()
-            logger.info("✅ Telegram Application создан успешно (альтернативным способом)")
-        except Exception as e2:
-            logger.error(f"❌ Ошибка создания Telegram Application альтернативным способом: {e2}")
-            yield
-            return
+        logger.error(f"❌ Ошибка создания Telegram Application: {e}")
+        yield
+        return
 
     # Добавляем обработчики
     try:
@@ -110,6 +99,19 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Обработчики добавлены успешно")
     except Exception as e:
         logger.error(f"❌ Ошибка добавления обработчиков: {e}")
+        yield
+        return
+
+    # Настройка webhook или polling
+    try:
+        if WEBHOOK_URL:
+            await telegram_app.bot.set_webhook(WEBHOOK_URL)
+            logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
+        else:
+            asyncio.create_task(telegram_app.run_polling())
+            logger.info("✅ Polling запущен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки webhook/polling: {e}")
         yield
         return
 
@@ -189,7 +191,6 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(600)  # Каждые 10 минут
             except Exception as e:
                 logger.error(f"❌ Ошибка внешнего keep-alive: {e}")
-                await asyncio.sleep(600)
 
     # Запускаем фоновые задачи
     asyncio.create_task(load_coins_after_startup())
@@ -197,282 +198,104 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(keep_alive())
     asyncio.create_task(external_keepalive())
 
-    # Инициализация бота
-    try:
-        await telegram_app.initialize()
-        logger.info("✅ Telegram Application инициализирован")
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации Telegram Application: {e}")
-        yield
-        return
+    yield  # Здесь FastAPI начинает слушать
 
-    # Определяем режим работы
-    from config import IS_RENDER_DEPLOYMENT
-    use_webhook = bool(WEBHOOK_URL and (ENVIRONMENT == 'production' or IS_RENDER_DEPLOYMENT))
+    # Shutdown
+    logger.info("Shutdown приложения...")
+    shutdown_event.set()
+    if telegram_app:
+        await telegram_app.stop()
 
-    if use_webhook:
-        logger.info("🚀 Продакшн режим (webhook)")
-    else:
-        logger.info("🔧 Режим разработки (polling)")
-
-    # Запускаем в соответствующем режиме
-    try:
-        await telegram_app.start()
-        logger.info("✅ Telegram бот запущен")
-    except Exception as e:
-        logger.error(f"❌ Ошибка запуска Telegram бота: {e}")
-        yield
-        return
-
-    if use_webhook:
-        # Продакшн режим - ТОЛЬКО webhook
-        try:
-            logger.info("🚀 Настройка webhook режима...")
-            await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(3)
-            webhook_url = f"{WEBHOOK_URL}/webhook"
-            result = await telegram_app.bot.set_webhook(
-                webhook_url, drop_pending_updates=True, max_connections=40)
-            if result:
-                logger.info(f"✅ Webhook установлен: {webhook_url}")
-            else:
-                logger.error("❌ Не удалось установить webhook")
-        except Exception as e:
-            logger.error(f"❌ Ошибка настройки webhook: {e}")
-    else:
-        # Режим разработки - ТОЛЬКО polling
-        try:
-            logger.info("🔧 Настройка polling режима...")
-            await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(2)
-            logger.info("✅ Webhook удален, готов к polling")
-            
-            async def run_polling():
-                try:
-                    await telegram_app.run_polling(drop_pending_updates=True)
-                except Exception as e:
-                    logger.error(f"❌ Ошибка polling: {e}")
-            
-            asyncio.create_task(run_polling())
-        except Exception as e:
-            logger.error(f"❌ Ошибка настройки polling: {e}")
-
-    # Yield для работы приложения
-    try:
-        yield
-    finally:
-        # Shutdown
-        logger.info("Завершение работы приложения...")
-        shutdown_event.set()
-        if telegram_app:
-            try:
-                await telegram_app.stop()
-                await telegram_app.shutdown()
-            except Exception as e:
-                logger.error(f"Ошибка при остановке бота: {e}")
-        logger.info("Приложение завершено")
-
-# FastAPI приложение - ДОЛЖНО БЫТЬ ПОСЛЕ ОПРЕДЕЛЕНИЯ lifespan
+# FastAPI app
 app = FastAPI(lifespan=lifespan)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    if not await has_basic_access(context.bot, update.effective_user.id):
-        await update.message.reply_text(get_chat_access_denied_message())
-        return
-
-    keyboard = [
-        [KeyboardButton("💰 К списку монет"), KeyboardButton("📋 Инструкция")],
-    ]
-
-    if is_super_admin(update.effective_user.id):
-        keyboard.append([KeyboardButton("🔄 Обновить список"), KeyboardButton("📊 Статистика прокси")])
-    elif is_admin_user(update.effective_user.id):
-        keyboard.append([KeyboardButton("🔍 Анализ по тикеру")])
-
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
-    welcome_message = """
-🚀 Добро пожаловать в Crypto Signals Bot!
-
-📊 Получайте мгновенные торговые сигналы на основе ИИ-анализа в реальном времени.
-
-🎯 Выберите действие ниже:
-"""
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def show_coins_list(update, context, edit_message=True):
-    """Показывает список топ-монет"""
-    global cached_coins
-    user_id = update.effective_user.id
-
-    if not await has_basic_access(context.bot, user_id):
-        await update.message.reply_text(get_chat_access_denied_message())
-        return
-
-    if not cached_coins:
-        cached_coins = await get_top_coins()
-
-    keyboard = []
-    row = []
-    for i, coin in enumerate(cached_coins):
-        row.append(InlineKeyboardButton(coin, callback_data=f"coin_{coin}"))
-        if (i + 1) % 3 == 0:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    additional_buttons = []
-    if is_super_admin(user_id) or is_admin_user(user_id):
-        additional_buttons.append([InlineKeyboardButton("🔍 Анализ по тикеру", callback_data="analyze_ticker")])
-    if is_super_admin(user_id):
-        additional_buttons.append([InlineKeyboardButton("🔄 Обновить список", callback_data="update_list")])
-        additional_buttons.append([InlineKeyboardButton("📊 Статистика прокси", callback_data="proxy_stats")])
-    
-    keyboard.extend(additional_buttons)
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    message_text = "💰 Выберите монету для анализа:"
-    
-    try:
-        if edit_message and hasattr(update, 'callback_query'):
-            await update.callback_query.edit_message_text(
-                text=message_text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                text=message_text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-    except Exception as e:
-        logger.error(f"Ошибка отображения списка монет: {e}")
-        await update.message.reply_text("❌ Ошибка отображения списка. Попробуйте снова.")
-
 async def delete_signal_message(context):
-    """Удаляет предыдущее сообщение с сигналом"""
+    """Удаляет предыдущее сообщение с сигналом если оно существует"""
     if 'signal_message_id' in context.user_data:
         try:
             await context.bot.delete_message(
                 chat_id=context.user_data['chat_id'],
                 message_id=context.user_data['signal_message_id']
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Не удалось удалить предыдущее сообщение: {e}")
         finally:
             del context.user_data['signal_message_id']
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    user_id = update.effective_user.id
+    if not await has_basic_access(context.bot, user_id):
+        await update.message.reply_text(get_chat_access_denied_message())
+        return
+
+    keyboard = []
+    keyboard.append([KeyboardButton("💰 К списку монет")])
+    keyboard.append([KeyboardButton("📋 Инструкция")])
+
+    if is_super_admin(user_id) or is_admin_user(user_id):
+        keyboard.append([KeyboardButton("🔍 Анализ по тикеру")])
+
+    if is_super_admin(user_id):
+        keyboard.append([KeyboardButton("🔄 Обновить список")])
+        keyboard.append([KeyboardButton("📊 Статистика прокси")])
+
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+    await update.message.reply_text(
+        "👋 Добро пожаловать! Выберите действие:",
+        reply_markup=reply_markup
+    )
+
+async def show_coins_list(update, context, edit_message=True):
+    """Показывает список топ-монет"""
+    global cached_coins
+    keyboard = [[InlineKeyboardButton(coin, callback_data=coin)] for coin in cached_coins]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = "💰 Выберите монету для анализа:"
+
+    if edit_message and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на inline-кнопки"""
+    """Обработчик кнопок"""
     query = update.callback_query
     await query.answer()
 
+    ticker = query.data
     user_id = query.from_user.id
-    data = query.data
 
-    if not await has_basic_access(context.bot, user_id):
-        await query.message.reply_text(get_chat_access_denied_message())
+    if not await has_basic_access(context.bot, query.from_user.id):
+        await query.edit_message_text(get_chat_access_denied_message())
         return
 
-    if data == "update_list":
-        if not is_super_admin(user_id):
-            await query.message.reply_text(get_access_denied_message())
-            return
+    # Удаляем предыдущий сигнал если есть
+    await delete_signal_message(context)
 
-        await query.message.edit_text("🔄 Обновление списка монет...")
-        try:
-            new_cached_coins = await update_coins_cache()
-            if new_cached_coins:
-                global cached_coins
-                cached_coins = new_cached_coins
-                await query.message.edit_text("✅ Список обновлен!")
-                await show_coins_list(update, context, edit_message=False)
-            else:
-                await query.message.edit_text("⚠️ API временно недоступен. Используем кэшированные данные.")
-                await show_coins_list(update, context, edit_message=False)
-        except Exception as e:
-            logger.error(f"Ошибка обновления списка: {e}")
-            await query.message.edit_text("❌ Ошибка обновления списка. Попробуйте позже.")
-            await show_coins_list(update, context, edit_message=False)
+    steps = [
+        "Подключение к Binance API...", "Загрузка исторических данных...",
+        "Мультифакторный анализ...", "Определение уровней входа...",
+        "Расчет риск/прибыль...", "✅ Сигнал готов!"
+    ]
 
-    elif data == "proxy_stats":
-        if not can_view_proxy_stats(user_id):
-            await query.message.reply_text(get_access_denied_message())
-            return
+    progress_msg = await query.edit_message_text("🔄 Анализирую...")
 
-        from config import get_proxy_stats
-        from admin_users import format_proxy_stats_message
-        
-        stats = get_proxy_stats()
-        message = format_proxy_stats_message(stats)
-        
-        await query.message.edit_text(message, parse_mode='Markdown')
+    signal = await analyze_ticker(ticker, update, progress_msg.message_id, context.bot)
 
-    elif data == "analyze_ticker":
-        if not is_super_admin(user_id) and not is_admin_user(user_id):
-            await query.message.reply_text(get_access_denied_message())
-            return
+    await context.bot.delete_message(
+        chat_id=query.message.chat_id,
+        message_id=progress_msg.message_id
+    )
 
-        await query.message.edit_text("🔍 Введите тикер монеты для анализа (например: BTC, ETH, ADA):")
-        context.user_data['waiting_for_ticker'] = True
-        context.user_data['chat_id'] = query.message.chat_id
-
-    elif data.startswith("coin_"):
-        ticker = data.replace("coin_", "")
-        
-        # Удаляем предыдущий сигнал если есть
-        await delete_signal_message(context)
-        
-        context.user_data['chat_id'] = query.message.chat_id
-        progress_msg = await query.message.edit_text("🔄 Анализирую...")
-
-        try:
-            signal = await analyze_ticker(ticker, update, progress_msg.message_id, context.bot)
-            
-            # Удаляем сообщение с прогрессом
-            await context.bot.delete_message(
-                chat_id=query.message.chat_id,
-                message_id=progress_msg.message_id
-            )
-
-            # Отправляем новый сигнал
-            signal_msg = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=signal,
-                parse_mode='Markdown'
-            )
-            
-            context.user_data['signal_message_id'] = signal_msg.message_id
-
-        except Exception as e:
-            logger.error(f"Ошибка анализа {ticker}: {e}")
-
-            # Удаляем сообщение с прогрессом
-            await context.bot.delete_message(
-                chat_id=query.message.chat_id,
-                message_id=progress_msg.message_id
-            )
-
-            # Отправляем сообщение об ошибке
-            error_msg = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"❌ Ошибка при анализе {ticker.upper()}. Попробуйте позже.",
-                parse_mode='Markdown'
-            )
-            context.user_data['signal_message_id'] = error_msg.message_id
+    signal_msg = await query.message.reply_text(signal, parse_mode='Markdown')
+    context.user_data['signal_message_id'] = signal_msg.message_id
+    context.user_data['chat_id'] = query.message.chat_id
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
-    global cached_coins
-
-    # Проверяем, что есть сообщение
-    if not update.message:
-        return
-
-    # Проверяем, что это личное сообщение, а не группа/канал
     if update.message.chat.type != 'private':
         # В группах/каналах бот не отвечает
         return
@@ -637,8 +460,6 @@ async def main():
                 logger.info("🚀 Режим: Production (Webhook)")
             elif is_production:
                 logger.info("🚀 Режим: Production (без webhook - polling)")
-            elif webhook_configured:
-                logger.info("🔧 Режим: Development (с webhook)")
             else:
                 logger.info("🔧 Режим: Development (polling)")
 
