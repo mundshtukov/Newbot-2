@@ -99,18 +99,16 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(5)  # Ждем 5 секунд после старта
             global cached_coins
             logger.info("🔄 Принудительное обновление списка монет после перезапуска...")
-            fresh_coins = await update_coins_cache()  # Используем update_coins_cache для принудительного обновления
+            fresh_coins = await update_coins_cache()
             if fresh_coins and len(fresh_coins) >= 10:
                 cached_coins = fresh_coins
                 logger.info(f"✅ После перезапуска загружены актуальные монеты: {len(fresh_coins)}")
                 logger.info(f"Обновленный список: {', '.join(fresh_coins)}")
             else:
                 logger.warning("⚠️ Не удалось загрузить актуальные монеты, используем fallback")
-                # Пробуем загрузить из кэша как fallback
                 cached_coins = await get_top_coins()
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки актуальных монет: {e}")
-            # В случае ошибки пробуем загрузить из кэша
             try:
                 cached_coins = await get_top_coins()
             except:
@@ -143,7 +141,6 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(180)  # Каждые 3 минуты
                 if not shutdown_event.is_set():
                     logger.info("🫀 Keep-alive ping - бот активен")
-                    # Дополнительная активность - проверяем состояние бота
                     if telegram_app and telegram_app.running:
                         logger.info("📱 Telegram бот в рабочем состоянии")
             except Exception as e:
@@ -155,7 +152,7 @@ async def lifespan(app: FastAPI):
         await asyncio.sleep(60)  # Начинаем через минуту после старта
         while not shutdown_event.is_set():
             try:
-                if WEBHOOK_URL:  # Только если есть внешний URL
+                if WEBHOOK_URL:
                     import aiohttp
                     async with aiohttp.ClientSession() as session:
                         url = f"{WEBHOOK_URL}/keepalive"
@@ -175,7 +172,7 @@ async def lifespan(app: FastAPI):
     # Инициализация бота
     await telegram_app.initialize()
 
-    # Определяем режим работы четко и однозначно
+    # Определяем режим работы
     from config import IS_RENDER_DEPLOYMENT
     use_webhook = bool(WEBHOOK_URL and (ENVIRONMENT == 'production' or IS_RENDER_DEPLOYMENT))
 
@@ -191,41 +188,29 @@ async def lifespan(app: FastAPI):
         # Продакшн режим - ТОЛЬКО webhook
         try:
             logger.info("🚀 Настройка webhook режима...")
-
-            # Принудительно удаляем webhook и очищаем состояние
             await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(3)  # Больше времени для очистки
-
-            # Устанавливаем новый webhook
+            await asyncio.sleep(3)
             webhook_url = f"{WEBHOOK_URL}/webhook"
             result = await telegram_app.bot.set_webhook(
                 webhook_url, drop_pending_updates=True, max_connections=40)
-
             if result:
                 logger.info(f"✅ Webhook установлен: {webhook_url}")
             else:
                 logger.error("❌ Не удалось установить webhook")
-
         except Exception as e:
             logger.error(f"❌ Ошибка настройки webhook: {e}")
     else:
         # Режим разработки - ТОЛЬКО polling
         try:
             logger.info("🔧 Настройка polling режима...")
-
-            # Удаляем webhook полностью
             await telegram_app.bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
-
             logger.info("✅ Webhook удален, готов к polling")
-
-            # Запускаем polling в фоновой задаче
             async def run_polling():
                 try:
                     await telegram_app.run_polling(drop_pending_updates=True)
                 except Exception as e:
                     logger.error(f"❌ Ошибка polling: {e}")
-
             asyncio.create_task(run_polling())
 
     try:
@@ -461,21 +446,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if new_cached_coins:
                 cached_coins = new_cached_coins
                 await status_msg.edit_text("✅ Список обновлен!")
-                # Показываем обновленный список
                 await show_coins_list(update, context, edit_message=False)
             else:
                 await status_msg.edit_text("⚠️ API временно недоступен. Используем кэшированные данные.")
-                # Показываем текущий список
                 await show_coins_list(update, context, edit_message=False)
         except Exception as e:
             logger.error(f"Ошибка обновления списка: {e}")
             await status_msg.edit_text("❌ Слишком частые обновления или API недоступен. Попробуйте позже (минимум через 10 минут).")
-            # Показываем текущий список даже при ошибке
             await show_coins_list(update, context, edit_message=False)
 
     elif text == "📊 Статистика прокси":
         if not can_view_proxy_stats(user_id):
-            await update.message.reply_text(get_access_denied_message())
+            await query.message.reply_text(get_access_denied_message())
             return
 
         from config import get_proxy_stats
@@ -531,7 +513,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif context.user_data.get('waiting_for_ticker'):
         if not is_super_admin(user_id) and not is_admin_user(user_id) and not await is_chat_member(context.bot, user_id):
-            await update.message.reply_text(get_access_denied_message())
+            await update.message.reply_text(get_chat_access_denied_message())
             context.user_data['waiting_for_ticker'] = False
             return
 
@@ -543,7 +525,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         progress_msg = await update.message.reply_text("🔄 Анализирую...")
 
-        # Создаем временный объект для analyze_ticker
         class TempUpdate:
             def __init__(self, message):
                 self.message = message
@@ -553,24 +534,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             signal = await analyze_ticker(ticker, temp_update, progress_msg.message_id, context.bot)
 
-            # Удаляем сообщение с прогрессом
             await context.bot.delete_message(
                 chat_id=update.message.chat_id,
                 message_id=progress_msg.message_id)
 
-            # Отправляем новый сигнал
             signal_msg = await update.message.reply_text(signal, parse_mode='Markdown')
             context.user_data['signal_message_id'] = signal_msg.message_id
 
         except Exception as e:
             logger.error(f"Ошибка анализа {ticker}: {e}")
 
-            # Удаляем сообщение с прогрессом
             await context.bot.delete_message(
                 chat_id=update.message.chat_id,
                 message_id=progress_msg.message_id)
 
-            # Отправляем сообщение об ошибке
             error_msg = await update.message.reply_text(
                 f"❌ Ошибка при анализе {ticker}. Проверьте правильность тикера.",
                 parse_mode='Markdown')
@@ -599,7 +576,6 @@ async def main():
         try:
             from config import IS_RENDER_DEPLOYMENT
 
-            # Определяем и логируем режим запуска
             webhook_configured = bool(WEBHOOK_URL)
             is_production = ENVIRONMENT == 'production' or IS_RENDER_DEPLOYMENT
 
@@ -614,7 +590,6 @@ async def main():
 
             logger.info(f"🌐 Запуск веб-сервера на {HOST}:{PORT} (попытка {restart_count + 1})")
             
-            # Настраиваем uvicorn
             config = uvicorn.Config(
                 app,
                 host=HOST,
@@ -626,10 +601,7 @@ async def main():
             )
             server = uvicorn.Server(config)
             
-            # Запускаем сервер
             await server.serve()
-            
-            # Если мы здесь, значит сервер завершился корректно
             break
             
         except KeyboardInterrupt:
@@ -642,7 +614,7 @@ async def main():
             if restart_count < max_restarts:
                 logger.info(f"Перезапуск через 5 секунд... ({restart_count}/{max_restarts})")
                 await asyncio.sleep(5)
-                shutdown_event.clear()  # Сбрасываем флаг завершения
+                shutdown_event.clear()
             else:
                 logger.error("Достигнуто максимальное количество перезапусков")
                 sys.exit(1)
