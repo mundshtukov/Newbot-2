@@ -23,9 +23,6 @@ logging.basicConfig(
     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI приложение
-app = FastAPI(lifespan=lifespan)
-
 # Глобальные переменные
 cached_coins = []
 telegram_app = None
@@ -111,7 +108,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Ошибка загрузки актуальных монет: {e}")
             try:
                 cached_coins = await get_top_coins()
-            except:
+            except Exception:
                 pass
 
     # Запускаем автоматическое обновление каждые 6 часов
@@ -206,13 +203,18 @@ async def lifespan(app: FastAPI):
             await telegram_app.bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
             logger.info("✅ Webhook удален, готов к polling")
+            
             async def run_polling():
                 try:
                     await telegram_app.run_polling(drop_pending_updates=True)
                 except Exception as e:
                     logger.error(f"❌ Ошибка polling: {e}")
+            
             asyncio.create_task(run_polling())
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки polling: {e}")
 
+    # Yield для работы приложения
     try:
         yield
     finally:
@@ -220,9 +222,15 @@ async def lifespan(app: FastAPI):
         logger.info("Завершение работы приложения...")
         shutdown_event.set()
         if telegram_app:
-            await telegram_app.stop()
-            await telegram_app.shutdown()
+            try:
+                await telegram_app.stop()
+                await telegram_app.shutdown()
+            except Exception as e:
+                logger.error(f"Ошибка при остановке бота: {e}")
         logger.info("Приложение завершено")
+
+# FastAPI приложение - ДОЛЖНО БЫТЬ ПОСЛЕ ОПРЕДЕЛЕНИЯ lifespan
+app = FastAPI(lifespan=lifespan)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -434,7 +442,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(get_chat_access_denied_message())
         return
 
-    if text == "🔄 Обновить список":
+    if text == "💰 К списку монет":
+        await show_coins_list(update, context, edit_message=False)
+
+    elif text == "🔄 Обновить список":
         if not is_super_admin(user_id):
             await update.message.reply_text(get_access_denied_message())
             return
@@ -457,7 +468,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "📊 Статистика прокси":
         if not can_view_proxy_stats(user_id):
-            await query.message.reply_text(get_access_denied_message())
+            await update.message.reply_text(get_access_denied_message())
             return
 
         from config import get_proxy_stats
