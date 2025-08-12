@@ -330,7 +330,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown')
             context.user_data['signal_message_id'] = error_msg.message_id
 
-async def delete_signal_message(context:/ContextTypes.DEFAULT_TYPE):
+async def delete_signal_message(context:ContextTypes.DEFAULT_TYPE):
     """Удаляет предыдущее сообщение с сигналом если оно есть"""
     if 'signal_message_id' in context.user_data:
         try:
