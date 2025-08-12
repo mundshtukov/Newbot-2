@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 from coingecko import get_top_coins, update_coins_cache
 from analysis import analyze_ticker
-from config import TELEGRAM_BOT_TOKEN, ENVIRONMENT, WEBHOOK_URL, PORT, HOST, BOT_DISABLED
+from config import TELEGRAM_BOT_TOKEN, ENVIRONMENT, PORT, HOST, BOT_DISABLED
 from admin_users import is_admin_user, is_super_admin, get_access_denied_message, is_chat_member, can_view_proxy_stats, get_chat_access_denied_message, has_basic_access
 
 # Настройка логирования
@@ -115,35 +115,14 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    # Настройка webhook или polling
+    # Запускаем polling
     try:
-        if WEBHOOK_URL:
-            # Устанавливаем webhook
-            webhook_path = f"{WEBHOOK_URL}/webhook"
-            logger.info(f"🌐 Устанавливаем webhook: {webhook_path}")
-            
-            # Увеличиваем timeout для webhook
-            await asyncio.wait_for(
-                telegram_app.bot.set_webhook(webhook_path), 
-                timeout=30
-            )
-            logger.info(f"✅ Webhook установлен: {webhook_path}")
-        else:
-            # Запускаем polling в отдельной задаче
-            logger.info("🔄 Запуск polling...")
-            
-            await telegram_app.start()
-            
-            # Запускаем polling в фоновой задаче
-            polling_task = asyncio.create_task(telegram_app.updater.start_polling())
-            logger.info("✅ Polling запущен")
-            
-    except asyncio.TimeoutError:
-        logger.error("❌ Timeout при установке webhook")
-        yield
-        return
+        logger.info("🔄 Запуск polling...")
+        await telegram_app.start()
+        polling_task = asyncio.create_task(telegram_app.updater.start_polling())
+        logger.info("✅ Polling запущен")
     except Exception as e:
-        logger.error(f"❌ Ошибка настройки webhook/polling: {e}")
+        logger.error(f"❌ Ошибка запуска polling: {e}")
         yield
         return
 
@@ -195,16 +174,19 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"❌ Ошибка автоматического обновления: {e}")
 
-    # Keep-alive механизм для предотвращения завершения процесса
+    # Keep-alive механизм для мониторинга состояния
     async def keep_alive():
         """Внутренний keep-alive механизм"""
         while not shutdown_event.is_set():
             try:
-                await asyncio.sleep(180)  # Каждые 3 минуты
-                if not shutdown_event.is_set():
+                await asyncio.sleep(60)  # Каждые 60 секунд
+                if not shutdown_event.is_set() and telegram_app and telegram_app.running:
                     logger.info("🫀 Keep-alive ping - бот активен")
-                    if telegram_app and telegram_app.running:
-                        logger.info("📱 Telegram бот работает")
+                    logger.info(f"CPU usage: {psutil.cpu_percent()}%")
+                    logger.info(f"Memory usage: {psutil.virtual_memory().percent}%")
+                else:
+                    logger.info("🛑 Keep-alive остановлен: приложение не активно")
+                    break
             except Exception as e:
                 logger.error(f"❌ Ошибка в keep-alive: {e}")
 
@@ -221,12 +203,8 @@ async def lifespan(app: FastAPI):
         logger.info("Shutdown приложения...")
         try:
             if telegram_app:
-                if WEBHOOK_URL:
-                    await telegram_app.bot.delete_webhook()
-                    logger.info("✅ Webhook удален")
-                else:
-                    await telegram_app.updater.stop()
-                    await telegram_app.stop()
+                await telegram_app.updater.stop()
+                await telegram_app.stop()
                 await telegram_app.shutdown()
                 logger.info("✅ Telegram Application завершено")
         except Exception as e:
@@ -330,7 +308,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown')
             context.user_data['signal_message_id'] = error_msg.message_id
 
-async def delete_signal_message(context:ContextTypes.DEFAULT_TYPE):
+async def delete_signal_message(context: ContextTypes.DEFAULT_TYPE):
     """Удаляет предыдущее сообщение с сигналом если оно есть"""
     if 'signal_message_id' in context.user_data:
         try:
@@ -516,25 +494,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown')
             context.user_data['signal_message_id'] = error_msg.message_id
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    """Обработчик webhook для Telegram"""
-    global telegram_app
-    
-    try:
-        if telegram_app and telegram_app.bot:
-            data = await request.json()
-            logger.info(f"Получен webhook: {data}")
-            update = Update.de_json(data, telegram_app.bot)
-            
-            # Создаем новый контекст для каждого обновления
-            await telegram_app.process_update(update)
-            
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Ошибка обработки webhook: {e}")
-        return {"status": "error", "message": str(e)}
-
 @app.get("/keepalive")
 async def keepalive():
     """Keep-alive endpoint"""
@@ -553,13 +512,10 @@ async def main():
         try:
             from config import IS_RENDER_DEPLOYMENT
 
-            webhook_configured = bool(WEBHOOK_URL)
             is_production = ENVIRONMENT == 'production' or IS_RENDER_DEPLOYMENT
 
-            if is_production and webhook_configured:
-                logger.info("🚀 Режим: Production (Webhook)")
-            elif is_production:
-                logger.info("🚀 Режим: Production (без webhook - polling)")
+            if is_production:
+                logger.info("🚀 Режим: Production (polling)")
             else:
                 logger.info("🔧 Режим: Development (polling)")
 
