@@ -106,6 +106,15 @@ async def lifespan(app: FastAPI):
         yield
         return
 
+    # Инициализируем приложение
+    try:
+        await telegram_app.initialize()
+        logger.info("✅ Telegram Application инициализирован")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации Telegram Application: {e}")
+        yield
+        return
+
     # Настройка webhook или polling
     try:
         if WEBHOOK_URL:
@@ -123,8 +132,6 @@ async def lifespan(app: FastAPI):
             # Запускаем polling в отдельной задаче
             logger.info("🔄 Запуск polling...")
             
-            # Инициализируем приложение
-            await telegram_app.initialize()
             await telegram_app.start()
             
             # Запускаем polling в фоновой задаче
@@ -197,165 +204,184 @@ async def lifespan(app: FastAPI):
                 if not shutdown_event.is_set():
                     logger.info("🫀 Keep-alive ping - бот активен")
                     if telegram_app and telegram_app.running:
-                        logger.info("📱 Telegram бот в рабочем состоянии")
+                        logger.info("📱 Telegram бот работает")
             except Exception as e:
-                logger.error(f"❌ Ошибка keep-alive: {e}")
+                logger.error(f"❌ Ошибка в keep-alive: {e}")
 
-    # Внешний keep-alive пинг (каждые 10 минут)
-    async def external_keepalive():
-        """Внешний keep-alive для поддержания активности"""
-        await asyncio.sleep(60)  # Начинаем через минуту после старта
-        while not shutdown_event.is_set():
-            try:
-                if WEBHOOK_URL:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as session:
-                        url = f"{WEBHOOK_URL}/keepalive"
-                        await session.get(url, timeout=10)
-                        logger.info("🌐 Внешний keep-alive пинг отправлен")
-                await asyncio.sleep(600)  # Каждые 10 минут
-            except Exception as e:
-                logger.error(f"❌ Ошибка внешнего keep-alive: {e}")
-
-    # Запускаем фоновые задачи
-    asyncio.create_task(load_coins_after_startup())
-    asyncio.create_task(auto_update_coins())
-    asyncio.create_task(keep_alive())
-    asyncio.create_task(external_keepalive())
-
-    yield  # Здесь FastAPI начинает слушать
-
-    # Shutdown
-    logger.info("Shutdown приложения...")
-    shutdown_event.set()
-    if telegram_app:
+    try:
+        # Запускаем задачи
+        asyncio.create_task(load_coins_after_startup())
+        asyncio.create_task(auto_update_coins())
+        asyncio.create_task(keep_alive())
+        
+        yield
+        
+    finally:
+        # Shutdown
+        logger.info("Shutdown приложения...")
         try:
-            if telegram_app.updater and telegram_app.updater.running:
-                await telegram_app.updater.stop()
-            await telegram_app.stop()
-            await telegram_app.shutdown()
+            if telegram_app:
+                if WEBHOOK_URL:
+                    await telegram_app.bot.delete_webhook()
+                    logger.info("✅ Webhook удален")
+                else:
+                    await telegram_app.updater.stop()
+                    await telegram_app.stop()
+                await telegram_app.shutdown()
+                logger.info("✅ Telegram Application завершено")
         except Exception as e:
             logger.error(f"Ошибка при shutdown: {e}")
 
-# FastAPI app
+# FastAPI приложение
 app = FastAPI(lifespan=lifespan)
-
-# Добавляем корневой endpoint
-@app.get("/")
-async def root():
-    """Корневой endpoint для проверки состояния"""
-    return {
-        "status": "running",
-        "service": "telegram-bot",
-        "timestamp": datetime.now().isoformat()
-    }
-
-async def delete_signal_message(context):
-    """Удаляет предыдущее сообщение с сигналом если оно существует"""
-    if 'signal_message_id' in context.user_data:
-        try:
-            await context.bot.delete_message(
-                chat_id=context.user_data['chat_id'],
-                message_id=context.user_data['signal_message_id']
-            )
-        except Exception as e:
-            logger.warning(f"Не удалось удалить предыдущее сообщение: {e}")
-        finally:
-            del context.user_data['signal_message_id']
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user_id = update.effective_user.id
-    logger.info(f"Команда /start от пользователя {user_id}")
     
+    # Проверяем базовый доступ
     if not await has_basic_access(context.bot, user_id):
         await update.message.reply_text(get_chat_access_denied_message())
         return
 
-    keyboard = []
-    keyboard.append([KeyboardButton("💰 К списку монет")])
-    keyboard.append([KeyboardButton("📋 Инструкция")])
-
+    keyboard = [
+        [
+            KeyboardButton("💰 К списку монет"),
+            KeyboardButton("📋 Инструкция")
+        ]
+    ]
+    
+    # Добавляем кнопку "Анализ по тикеру" для админов
     if is_super_admin(user_id) or is_admin_user(user_id):
-        keyboard.append([KeyboardButton("🔍 Анализ по тикеру")])
-
+        keyboard[0].append(KeyboardButton("🔍 Анализ по тикеру"))
+    
+    # Добавляем кнопку статистики прокси для разрешенных пользователей
+    if can_view_proxy_stats(user_id):
+        keyboard.append([KeyboardButton("📊 Статистика прокси")])
+    
+    # Добавляем кнопку обновления для супер-админа
     if is_super_admin(user_id):
         keyboard.append([KeyboardButton("🔄 Обновить список")])
-        keyboard.append([KeyboardButton("📊 Статистика прокси")])
 
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 Добро пожаловать! Выберите действие:",
+        f"👋 Привет, {update.effective_user.first_name}!\n\n"
+        "Я бот для анализа криптовалют. Выбери опцию ниже 👇",
         reply_markup=reply_markup
     )
 
-async def show_coins_list(update, context, edit_message=True):
-    """Показывает список топ-монет"""
-    global cached_coins
-    keyboard = [[InlineKeyboardButton(coin, callback_data=coin)] for coin in cached_coins]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    text = "💰 Выберите монету для анализа:"
-
-    if edit_message and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup)
-
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопок"""
+    """Обработчик callback-запросов от inline-кнопок"""
     query = update.callback_query
     await query.answer()
-
-    ticker = query.data
+    
     user_id = query.from_user.id
-    logger.info(f"Нажата кнопка {ticker} пользователем {user_id}")
+    data = query.data
 
-    if not await has_basic_access(context.bot, query.from_user.id):
-        await query.edit_message_text(get_chat_access_denied_message())
+    if not await has_basic_access(context.bot, user_id):
+        await query.message.reply_text(get_chat_access_denied_message())
         return
 
-    # Удаляем предыдущий сигнал если есть
-    await delete_signal_message(context)
+    if data == "show_coins":
+        await show_coins_list(update, context, edit_message=True)
+    elif data.startswith("analyze_"):
+        ticker = data.split("_")[1]
+        
+        # Удаляем предыдущий сигнал если есть
+        await delete_signal_message(context)
+        
+        progress_msg = await query.message.reply_text("🔄 Анализирую...")
+        
+        try:
+            signal = await analyze_ticker(ticker, update, progress_msg.message_id, context.bot)
+            
+            await context.bot.delete_message(
+                chat_id=query.message.chat_id,
+                message_id=progress_msg.message_id)
+            
+            signal_msg = await query.message.reply_text(signal, parse_mode='Markdown')
+            context.user_data['signal_message_id'] = signal_msg.message_id
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа {ticker}: {e}")
+            await context.bot.delete_message(
+                chat_id=query.message.chat_id,
+                message_id=progress_msg.message_id)
+            error_msg = await query.message.reply_text(
+                f"❌ Ошибка при анализе {ticker}. Проверьте правильность тикера.",
+                parse_mode='Markdown')
+            context.user_data['signal_message_id'] = error_msg.message_id
 
-    steps = [
-        "Подключение к Binance API...", "Загрузка исторических данных...",
-        "Мультифакторный анализ...", "Определение уровней входа...",
-        "Расчет риск/прибыль...", "✅ Сигнал готов!"
-    ]
+async def delete_signal_message(context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет предыдущее сообщение с сигналом если оно есть"""
+    if 'signal_message_id' in context.user_data:
+        try:
+            await context.bot.delete_message(
+                chat_id=context.user_data['chat_id'],
+                message_id=context.user_data['signal_message_id'])
+            del context.user_data['signal_message_id']
+        except Exception as e:
+            logger.error(f"Ошибка удаления сообщения: {e}")
 
-    progress_msg = await query.edit_message_text("🔄 Анализирую...")
+async def show_coins_list(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_message=False):
+    """Показывает список топ-монет с inline-кнопками"""
+    global cached_coins
+    
+    user_id = update.effective_user.id
+    if not await has_basic_access(context.bot, user_id):
+        await update.message.reply_text(get_chat_access_denied_message())
+        return
 
-    signal = await analyze_ticker(ticker, update, progress_msg.message_id, context.bot)
-
-    await context.bot.delete_message(
-        chat_id=query.message.chat_id,
-        message_id=progress_msg.message_id
+    # Проверяем кэш
+    if not cached_coins:
+        cached_coins = await get_top_coins()
+    
+    # Создаем inline-кнопки
+    keyboard = []
+    for i in range(0, len(cached_coins), 3):
+        row = []
+        for coin in cached_coins[i:i+3]:
+            row.append(InlineKeyboardButton(f"{coin}", callback_data=f"analyze_{coin}"))
+        keyboard.append(row)
+    
+    # Добавляем кнопку "Назад к меню"
+    keyboard.append([InlineKeyboardButton("💰 Назад к меню", callback_data="show_coins")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message_text = (
+        "📈 **Топ-монеты для анализа**\n\n"
+        f"Выберите монету для анализа ({len(cached_coins)} доступно):"
     )
-
-    signal_msg = await query.message.reply_text(signal, parse_mode='Markdown')
-    context.user_data['signal_message_id'] = signal_msg.message_id
-    context.user_data['chat_id'] = query.message.chat_id
+    
+    try:
+        if edit_message and update.callback_query:
+            await update.callback_query.message.edit_text(
+                message_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(
+                message_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Ошибка отображения списка монет: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка отображения списка монет. Попробуйте снова.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
-    if update.message.chat.type != 'private':
-        # В группах/каналах бот не отвечает
-        return
-
+    user_id = update.effective_user.id
     text = update.message.text
-    user_id = update.message.from_user.id
-    logger.info(f"Сообщение '{text}' от пользователя {user_id}")
 
-    # Проверяем базовый доступ: либо админ, либо участник чата
-    if not is_admin_user(user_id) and not await is_chat_member(context.bot, user_id):
+    if not await has_basic_access(context.bot, user_id):
         await update.message.reply_text(get_chat_access_denied_message())
         return
 
     if text == "💰 К списку монет":
         await show_coins_list(update, context, edit_message=False)
-
+    
     elif text == "🔄 Обновить список":
         if not is_super_admin(user_id):
             await update.message.reply_text(get_access_denied_message())
