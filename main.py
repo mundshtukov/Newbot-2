@@ -83,21 +83,18 @@ async def lifespan(app: FastAPI):
 
     # Создаем Telegram Application
     try:
-        # Основной способ создания приложения
         telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        logger.info("✅ Telegram Application создан успешно (основным способом)")
+        logger.info("✅ Telegram Application создан успешно")
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка создания Telegram Application основным способом: {e}")
+        logger.error(f"❌ Ошибка создания Telegram Application: {e}")
+        # Пробуем альтернативный способ с более простыми настройками
         try:
-            # Альтернативный способ без конкретных настроек
-            from telegram.ext import Application
             from telegram import Bot
-            
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
             telegram_app = Application.builder().bot(bot).build()
-            logger.info("✅ Telegram Application создан успешно (альтернативным способом)")
+            logger.info("✅ Telegram Application создан успешно (альтернативный способ)")
         except Exception as e2:
-            logger.error(f"❌ Ошибка создания Telegram Application альтернативным способом: {e2}")
+            logger.error(f"❌ Критическая ошибка создания бота: {e2}")
             yield
             return
 
@@ -119,83 +116,6 @@ async def lifespan(app: FastAPI):
         'SHIB', 'LTC', 'ATOM'
     ]
     logger.info(f"Загружено {len(cached_coins)} монет (fallback)")
-
-    # Загружаем актуальные монеты в фоне после старта сервера
-    async def load_coins_after_startup():
-        """Загружает актуальные монеты после старта сервера"""
-        try:
-            await asyncio.sleep(5)  # Ждем 5 секунд после старта
-            global cached_coins
-            logger.info("🔄 Принудительное обновление списка монет после перезапуска...")
-            fresh_coins = await update_coins_cache()
-            if fresh_coins and len(fresh_coins) >= 10:
-                cached_coins = fresh_coins
-                logger.info(f"✅ После перезапуска загружены актуальные монеты: {len(fresh_coins)}")
-                logger.info(f"Обновленный список: {', '.join(fresh_coins)}")
-            else:
-                logger.warning("⚠️ Не удалось загрузить актуальные монеты, используем fallback")
-                cached_coins = await get_top_coins()
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки актуальных монет: {e}")
-            try:
-                cached_coins = await get_top_coins()
-            except Exception:
-                pass
-
-    # Запускаем автоматическое обновление каждые 6 часов
-    async def auto_update_coins():
-        """Автоматически обновляет список монет каждые 6 часов"""
-        while not shutdown_event.is_set():
-            try:
-                await asyncio.sleep(6 * 60 * 60)  # 6 часов = 21600 секунд
-                if shutdown_event.is_set():
-                    break
-                logger.info("🔄 Автоматическое обновление списка монет...")
-                new_coins = await update_coins_cache()
-                if new_coins and len(new_coins) >= 10:
-                    global cached_coins
-                    cached_coins = new_coins
-                    logger.info(f"✅ Автоматически обновлено: {len(new_coins)} монет")
-                else:
-                    logger.warning("⚠️ Автоматическое обновление не дало результатов")
-            except Exception as e:
-                logger.error(f"❌ Ошибка автоматического обновления: {e}")
-
-    # Keep-alive механизм для предотвращения завершения процесса
-    async def keep_alive():
-        """Внутренний keep-alive механизм"""
-        while not shutdown_event.is_set():
-            try:
-                await asyncio.sleep(180)  # Каждые 3 минуты
-                if not shutdown_event.is_set():
-                    logger.info("🫀 Keep-alive ping - бот активен")
-                    if telegram_app and telegram_app.running:
-                        logger.info("📱 Telegram бот в рабочем состоянии")
-            except Exception as e:
-                logger.error(f"❌ Ошибка keep-alive: {e}")
-
-    # Внешний keep-alive пинг (каждые 10 минут)
-    async def external_keepalive():
-        """Внешний keep-alive для поддержания активности"""
-        await asyncio.sleep(60)  # Начинаем через минуту после старта
-        while not shutdown_event.is_set():
-            try:
-                if WEBHOOK_URL:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as session:
-                        url = f"{WEBHOOK_URL}/keepalive"
-                        await session.get(url, timeout=10)
-                        logger.info("🌐 Внешний keep-alive пинг отправлен")
-                await asyncio.sleep(600)  # Каждые 10 минут
-            except Exception as e:
-                logger.error(f"❌ Ошибка внешнего keep-alive: {e}")
-                await asyncio.sleep(600)
-
-    # Запускаем фоновые задачи
-    asyncio.create_task(load_coins_after_startup())
-    asyncio.create_task(auto_update_coins())
-    asyncio.create_task(keep_alive())
-    asyncio.create_task(external_keepalive())
 
     # Инициализация бота
     try:
@@ -247,15 +167,80 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(2)
             logger.info("✅ Webhook удален, готов к polling")
             
+            # Запускаем polling в отдельной задаче
             async def run_polling():
                 try:
-                    await telegram_app.run_polling(drop_pending_updates=True)
+                    logger.info("🔄 Запуск polling...")
+                    await telegram_app.run_polling(
+                        drop_pending_updates=True,
+                        close_loop=False
+                    )
                 except Exception as e:
                     logger.error(f"❌ Ошибка polling: {e}")
             
-            asyncio.create_task(run_polling())
+            # Создаем задачу для polling
+            polling_task = asyncio.create_task(run_polling())
+            
         except Exception as e:
             logger.error(f"❌ Ошибка настройки polling: {e}")
+
+    # Фоновые задачи
+    async def load_coins_after_startup():
+        """Загружает актуальные монеты после старта сервера"""
+        try:
+            await asyncio.sleep(5)  # Ждем 5 секунд после старта
+            global cached_coins
+            logger.info("🔄 Принудительное обновление списка монет после перезапуска...")
+            fresh_coins = await update_coins_cache()
+            if fresh_coins and len(fresh_coins) >= 10:
+                cached_coins = fresh_coins
+                logger.info(f"✅ После перезапуска загружены актуальные монеты: {len(fresh_coins)}")
+            else:
+                logger.warning("⚠️ Не удалось загрузить актуальные монеты, используем fallback")
+                cached_coins = await get_top_coins()
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки актуальных монет: {e}")
+            try:
+                cached_coins = await get_top_coins()
+            except Exception:
+                pass
+
+    # Автоматическое обновление каждые 6 часов
+    async def auto_update_coins():
+        """Автоматически обновляет список монет каждые 6 часов"""
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.sleep(6 * 60 * 60)  # 6 часов = 21600 секунд
+                if shutdown_event.is_set():
+                    break
+                logger.info("🔄 Автоматическое обновление списка монет...")
+                new_coins = await update_coins_cache()
+                if new_coins and len(new_coins) >= 10:
+                    global cached_coins
+                    cached_coins = new_coins
+                    logger.info(f"✅ Автоматически обновлено: {len(new_coins)} монет")
+                else:
+                    logger.warning("⚠️ Автоматическое обновление не дало результатов")
+            except Exception as e:
+                logger.error(f"❌ Ошибка автоматического обновления: {e}")
+
+    # Keep-alive механизм
+    async def keep_alive():
+        """Внутренний keep-alive механизм"""
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.sleep(180)  # Каждые 3 минуты
+                if not shutdown_event.is_set():
+                    logger.info("🫀 Keep-alive ping - бот активен")
+                    if telegram_app and telegram_app.running:
+                        logger.info("📱 Telegram бот в рабочем состоянии")
+            except Exception as e:
+                logger.error(f"❌ Ошибка keep-alive: {e}")
+
+    # Запускаем фоновые задачи
+    asyncio.create_task(load_coins_after_startup())
+    asyncio.create_task(auto_update_coins())
+    asyncio.create_task(keep_alive())
 
     # Yield для работы приложения
     try:
@@ -619,7 +604,12 @@ async def webhook(request: Request):
 @app.get("/keepalive")
 async def keepalive():
     """Keep-alive endpoint"""
-    return {"status": "alive"}
+    return {"status": "alive", "timestamp": datetime.now().isoformat()}
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"status": "Crypto Signals Bot is running", "timestamp": datetime.now().isoformat()}
 
 async def main():
     """Основная функция с обработкой перезапуска"""
