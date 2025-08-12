@@ -51,6 +51,14 @@ async def lifespan(app: FastAPI):
         yield
         return
 
+    # Проверяем наличие токена
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN не задан")
+        yield
+        return
+    
+    logger.info(f"🔑 Токен бота присутствует (длина: {len(TELEGRAM_BOT_TOKEN)})")
+
     # Проверка на единственный экземпляр
     import psutil
     current_pid = os.getpid()
@@ -74,13 +82,36 @@ async def lifespan(app: FastAPI):
         return
 
     # Создаем Telegram Application
-    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    try:
+        # Основной способ создания приложения
+        telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        logger.info("✅ Telegram Application создан успешно (основным способом)")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка создания Telegram Application основным способом: {e}")
+        try:
+            # Альтернативный способ без конкретных настроек
+            from telegram.ext import Application
+            from telegram import Bot
+            
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            telegram_app = Application.builder().bot(bot).build()
+            logger.info("✅ Telegram Application создан успешно (альтернативным способом)")
+        except Exception as e2:
+            logger.error(f"❌ Ошибка создания Telegram Application альтернативным способом: {e2}")
+            yield
+            return
 
     # Добавляем обработчики
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CallbackQueryHandler(button_callback))
-    telegram_app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    try:
+        telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(CallbackQueryHandler(button_callback))
+        telegram_app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        logger.info("✅ Обработчики добавлены успешно")
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления обработчиков: {e}")
+        yield
+        return
 
     # Используем fallback монеты для быстрого старта
     cached_coins = [
@@ -167,7 +198,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(external_keepalive())
 
     # Инициализация бота
-    await telegram_app.initialize()
+    try:
+        await telegram_app.initialize()
+        logger.info("✅ Telegram Application инициализирован")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации Telegram Application: {e}")
+        yield
+        return
 
     # Определяем режим работы
     from config import IS_RENDER_DEPLOYMENT
@@ -179,7 +216,13 @@ async def lifespan(app: FastAPI):
         logger.info("🔧 Режим разработки (polling)")
 
     # Запускаем в соответствующем режиме
-    await telegram_app.start()
+    try:
+        await telegram_app.start()
+        logger.info("✅ Telegram бот запущен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска Telegram бота: {e}")
+        yield
+        return
 
     if use_webhook:
         # Продакшн режим - ТОЛЬКО webhook
